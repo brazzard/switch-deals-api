@@ -1,15 +1,15 @@
 const { getGamesEurope, parseNSUID, Region, getPrices, getShopsEurope } = require('nintendo-switch-eshop');
 const express = require('express');
 const Game = require('../models/game');
+const Subregion = require('../models/subregion');
 const router = express.Router();
+// const fs = require('fs');
 
 router.get('/', paginatedResults(Game), (req, res) => {
     res.send(res.paginatedResults)
 });
 
 router.post('/', (req, res) => {
-    // fetchGamesData()
-    // res.send()
     fetchFullGamesData()
     res.send()
 
@@ -19,6 +19,7 @@ function paginatedResults(model) {
     return async (req, res, next) => {
         const page = parseInt(req.query.page)
         const limit = parseInt(req.query.limit)
+        // const subregion = req.headers.subregion
 
         const startIndex = (page - 1) * limit
         const endIndex = page * limit 
@@ -33,9 +34,8 @@ function paginatedResults(model) {
         }
         const { sort } = req.query
         if (sort) {
-            sortQuery[sort] = 1
+            sortQuery.sort = 1
         }
-
         
         
         if (endIndex < await model.countDocuments(filterQuery).exec()) {
@@ -55,6 +55,7 @@ function paginatedResults(model) {
         try {
             results.results = await model.find(filterQuery)
                                          .sort(sortQuery)
+                                         .select(subregionQuery)
                                          .limit(limit)
                                          .skip(startIndex)
                                          .exec()
@@ -69,63 +70,95 @@ function paginatedResults(model) {
 const fetchFullGamesData = async () => {
 
     const games = await getGamesEurope()
+    // JSON.parse(fs.readFileSync("./games.json").toString());
+
     console.log(games)
 
     const gameIDs = games.map(g => parseNSUID(g, Region.EUROPE))
+    const subregions = await Subregion.find({region: 2}).exec()
 
-    const priceData = await getPrices("RU", gameIDs)
-    const discountPrices = priceData.prices.filter(p => p.discount_price);
+    const priceData = await subregionPrices(subregions, gameIDs)
+    // JSON.parse(fs.readFileSync("./prices.json").toString());
 
-    const gamesOnSale = []
+    console.log(priceData)
 
+    const gamesObjects = await priceMapper(priceData, games)
+    const gamesWithLanguages = await languageMapper(gamesObjects)
 
-    discountPrices.forEach(gamePrice => {
-        const gameIndex = games.findIndex(g => parseNSUID(g, Region.EUROPE) == gamePrice.title_id)
-        if (gameIndex == -1) {
-            games[gameIndex].price_data = gamePrice
-        }
-    })
-
-    console.log(games)
-
-    // discountPrices.forEach(price => {
-    //     const game = games.find(g => parseNSUID(g, Region.EUROPE) == price.title_id);
-    //     if (game) {
-    //         game.price_data = price;
-    //         gamesOnSale.push(game);
-    //     }
-    // })
-    console.log(gamesOnSale)
-    console.log(`Found ${gamesOnSale.length} games on sale`)
-
-}
-
-const fetchGamesData = () => {
-    getGamesEurope()
-        .then( games => {
-            console.log("Next amount of games: " + games.length + " have been parsed")
-            console.log(games)
-            saveToDB(games)
-            console.log('Games are fetched')
-        })
-        .catch( err => {
-            console.log(err)
-        })
+    saveToDB(gamesWithLanguages)
+    console.log(gamesWithLanguages)
 }
 
 function saveToDB(games) {
     games.forEach(g => {
         const game = new Game({
             name: g.title,
-            price: g.price_regular_f,
+            default_price: g.price_regular_f,
             game_categories: g.game_categories_txt,
             image: g.image_url,
             publisher: g.publisher,
-            url: g.url
-
+            url: g.url,
+            current_price: g.current_price,
+            regular_price: g.regular_price,
+            has_discount: g.price_has_discount_b,
+            language_availability: g.languages,
+            discount_percentage: g.price_discount_percentage_f,
+            release_date: g.date_from,
+            age_rating: g.age_rating_sorting_i,
+            players: g.players_to,
+            short_desсription: g.excerpt,
+            banner: g.wishlist_email_banner640w_image_url_s,
+            popularity: g.popularity
         });
         game.save();
     })
+}
+
+async function subregionPrices(subregions, gameIDs) {
+    const priceData = {}
+    for(const s of subregions){
+        const priceResult = await getPrices(s.code, gameIDs)
+                priceData[s.code] = priceResult
+                console.log(priceData)
+        }
+    return priceData
+}
+
+async function priceMapper(priceData, games) {
+    games.forEach(game => {
+        const regionPrices = {}
+        for (const subregion in priceData) {
+            const gamePrice = priceData[subregion].prices.find(p => parseNSUID(game, Region.EUROPE) == p.title_id)
+            if (gamePrice) {
+                regionPrices[subregion] = gamePrice
+            }
+        }
+
+        const regularPrices = {}
+        const currentPrices = {}
+        for (const regionPrice in regionPrices) {
+            if (regionPrices[regionPrice].hasOwnProperty('regular_price')) {
+                regularPrices[regionPrice] = regionPrices[regionPrice].regular_price.raw_value
+                if (regionPrices[regionPrice].hasOwnProperty('discount_price')) {
+                    currentPrices[regionPrice] = regionPrices[regionPrice].discount_price.raw_value
+                } else {
+                    currentPrices[regionPrice] = regionPrices[regionPrice].regular_price.raw_value
+                }
+            } 
+        }
+
+        game.regular_price = regularPrices
+        game.current_price = currentPrices
+    })
+    
+    return games
+}
+
+async function languageMapper(games) {
+    games.forEach(game => {
+        game.languages = game.language_availability[0].split(",")
+    })
+    return games
 }
 
 module.exports = router;
